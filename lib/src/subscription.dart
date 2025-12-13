@@ -19,12 +19,14 @@ class SubscriptionOptions {
   final TransmitHttpClient httpClient;
   final TransmitStatus Function() getEventSourceStatus;
   final Hook? hooks;
+  final void Function(String channel)? onDeleted;
 
   SubscriptionOptions({
     required this.channel,
     required this.httpClient,
     required this.getEventSourceStatus,
     this.hooks,
+    this.onDeleted,
   });
 }
 
@@ -34,6 +36,7 @@ class Subscription {
   final Hook? _hooks;
   final String _channel;
   final TransmitStatus Function() _getEventSourceStatus;
+  final void Function(String channel)? _onDeleted;
   final Set<void Function(dynamic)> _handlers = {};
   final StreamController<dynamic> _messageStreamController = StreamController<dynamic>.broadcast();
   SubscriptionStatus _status = SubscriptionStatus.pending;
@@ -42,7 +45,11 @@ class Subscription {
       : _httpClient = options.httpClient,
         _hooks = options.hooks,
         _channel = options.channel,
-        _getEventSourceStatus = options.getEventSourceStatus;
+        _getEventSourceStatus = options.getEventSourceStatus,
+        _onDeleted = options.onDeleted;
+  
+  /// Returns the channel name for this subscription.
+  String get channel => _channel;
 
   /// Returns if the subscription is created or not.
   bool get isCreated => _status == SubscriptionStatus.created;
@@ -164,6 +171,9 @@ class Subscription {
 
       _status = SubscriptionStatus.deleted;
       _hooks?.onUnsubscription(_channel);
+      
+      // Notify Transmit to remove this subscription from its internal map
+      _onDeleted?.call(_channel);
       
       // Close the stream controller when subscription is deleted
       if (!_messageStreamController.isClosed) {

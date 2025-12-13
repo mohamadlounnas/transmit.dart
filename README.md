@@ -463,11 +463,18 @@ Creates a new Transmit client and automatically connects to the server.
 #### Properties
 
 - `String uid` - The unique identifier for this client instance
+- `bool isConnected` - Whether the client is currently connected
+- `bool isReconnecting` - Whether the client is currently attempting to reconnect
+- `int reconnectAttempts` - The current number of reconnect attempts
+- `DateTime? nextRetryTime` - The timestamp when the next reconnect attempt will occur (null if not reconnecting)
 
 #### Methods
 
 - `Subscription subscription(String channel)` - Create or get a subscription for a channel
 - `StreamSubscription<TransmitStatus> on(String event, void Function() callback)` - Listen to connection events
+- `Future<void> reconnect()` - Force an immediate reconnection attempt (useful when connectivity is restored)
+- `void setHeaders(Map<String, String>? headers)` - Set headers for all HTTP requests
+- `Map<String, String> getHeaders()` - Get the current headers
 - `void close()` - Close the connection and clean up resources
 
 #### Events
@@ -489,7 +496,14 @@ class TransmitOptions {
   final void Function(http.Request)? beforeSubscribe; // Optional: Hook before subscribe
   final void Function(http.Request)? beforeUnsubscribe; // Optional: Hook before unsubscribe
   final int? maxReconnectAttempts;                  // Optional: Max reconnect attempts (default: 5)
+  final Duration? reconnectInitialDelay;           // Optional: Initial delay (default: 1000ms)
+  final Duration? reconnectMaxDelay;                // Optional: Max delay (default: 30s)
+  final double? reconnectBackoffMultiplier;         // Optional: Exponential multiplier (default: 2.0)
+  final double? reconnectJitterFactor;              // Optional: Jitter factor (default: 0.1)
   final void Function(int)? onReconnectAttempt;      // Optional: Called on each reconnect attempt
+  final void Function()? onReconnecting;            // Optional: Called when reconnection starts
+  final void Function()? onReconnected;              // Optional: Called when reconnection succeeds
+  final void Function()? onDisconnected;             // Optional: Called when disconnected
   final void Function()? onReconnectFailed;         // Optional: Called when reconnection fails
   final void Function(http.Response)? onSubscribeFailed; // Optional: Called when subscription fails
   final void Function(String)? onSubscription;       // Optional: Called when subscription succeeds
@@ -502,7 +516,14 @@ class TransmitOptions {
 - **`baseUrl`** (required): The base URL of the AdonisJS server (e.g., `'http://localhost:3333'`)
 - **`uidGenerator`**: Custom function to generate unique client IDs. Defaults to UUID v4
 - **`maxReconnectAttempts`**: Maximum number of reconnection attempts. Defaults to `5`
+- **`reconnectInitialDelay`**: Initial delay before first reconnect attempt. Defaults to `1000ms`
+- **`reconnectMaxDelay`**: Maximum delay between reconnect attempts. Defaults to `30s`
+- **`reconnectBackoffMultiplier`**: Exponential backoff multiplier. Defaults to `2.0`
+- **`reconnectJitterFactor`**: Jitter factor to prevent thundering herd (0.0-1.0). Defaults to `0.1` (±10%)
 - **`onReconnectAttempt`**: Callback called on each reconnection attempt with the attempt number
+- **`onReconnecting`**: Callback called when reconnection process starts
+- **`onReconnected`**: Callback called when reconnection succeeds (only called when transitioning from reconnecting to connected)
+- **`onDisconnected`**: Callback called when the connection is lost
 - **`onReconnectFailed`**: Callback called when all reconnection attempts have failed
 - **`onSubscribeFailed`**: Callback called when a subscription request fails
 - **`onSubscription`**: Callback called when a subscription is successfully created
@@ -581,8 +602,21 @@ The client automatically reconnects when the connection is lost. You can customi
 final transmit = Transmit(TransmitOptions(
   baseUrl: 'http://localhost:3333',
   maxReconnectAttempts: 10,
+  reconnectInitialDelay: Duration(seconds: 1),
+  reconnectMaxDelay: Duration(seconds: 30),
+  reconnectBackoffMultiplier: 2.0,
+  reconnectJitterFactor: 0.1,
   onReconnectAttempt: (attempt) {
     print('Reconnect attempt $attempt');
+  },
+  onReconnecting: () {
+    print('Started reconnecting...');
+  },
+  onReconnected: () {
+    print('Successfully reconnected!');
+  },
+  onDisconnected: () {
+    print('Disconnected from server');
   },
   onReconnectFailed: () {
     print('Failed to reconnect after all attempts');
@@ -592,9 +626,76 @@ final transmit = Transmit(TransmitOptions(
 
 When the connection is lost:
 1. The client enters `reconnecting` status
-2. It attempts to reconnect with exponential backoff
+2. It attempts to reconnect with exponential backoff and jitter
 3. All existing subscriptions are automatically re-registered on successful reconnection
 4. If all attempts fail, `onReconnectFailed` is called
+
+#### Reconnect State Properties
+
+You can check the reconnect state at any time:
+
+```dart
+// Check if currently reconnecting
+if (transmit.isReconnecting) {
+  print('Currently reconnecting...');
+  print('Attempt: ${transmit.reconnectAttempts}');
+  
+  // Get next retry time
+  final nextRetry = transmit.nextRetryTime;
+  if (nextRetry != null) {
+    final remaining = nextRetry.difference(DateTime.now());
+    print('Next retry in: ${remaining.inSeconds} seconds');
+  }
+}
+
+// Check if connected
+if (transmit.isConnected) {
+  print('Connected to server');
+}
+```
+
+#### Force Reconnect
+
+You can force an immediate reconnection attempt:
+
+```dart
+// Force reconnect (useful when connectivity is restored)
+await transmit.reconnect();
+```
+
+#### Flutter Connectivity Integration
+
+In Flutter apps, you can integrate with `connectivity_plus` to reconnect immediately when connectivity is restored:
+
+```dart
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:transmit_client/transmit.dart';
+
+final transmit = Transmit(TransmitOptions(
+  baseUrl: 'http://localhost:3333',
+));
+
+// Listen to connectivity changes
+final connectivity = Connectivity();
+connectivity.onConnectivityChanged.listen((result) {
+  if (result != ConnectivityResult.none) {
+    // Connectivity restored - force reconnect if needed
+    if (transmit.isReconnecting) {
+      transmit.reconnect();
+    }
+  }
+});
+```
+
+#### Reconnect Configuration Options
+
+- **`maxReconnectAttempts`**: Maximum number of reconnect attempts (default: 5)
+- **`reconnectInitialDelay`**: Initial delay before first reconnect (default: 1000ms)
+- **`reconnectMaxDelay`**: Maximum delay between reconnects (default: 30s)
+- **`reconnectBackoffMultiplier`**: Exponential multiplier (default: 2.0)
+- **`reconnectJitterFactor`**: Jitter factor to prevent thundering herd (default: 0.1 = ±10%)
+
+The delay calculation follows: `initialDelay * (multiplier ^ (attempt - 1)) + jitter`
 
 ### Request Hooks
 

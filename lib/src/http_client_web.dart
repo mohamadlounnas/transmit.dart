@@ -7,11 +7,11 @@
  * file that was distributed with this source code.
  */
 
-import 'dart:html' as html;
+import 'package:web/web.dart' as web;
 
 /// Web implementation for XSRF token retrieval.
 String? retrieveXsrfTokenImpl() {
-  final cookies = html.document.cookie ?? '';
+  final cookies = web.document.cookie;
   final match = RegExp(r'(^|;\s*)(XSRF-TOKEN)=([^;]*)').firstMatch(cookies);
   return match != null ? Uri.decodeComponent(match.group(3)!) : null;
 }

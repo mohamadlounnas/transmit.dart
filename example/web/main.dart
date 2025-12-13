@@ -8,7 +8,8 @@
  */
 
 import 'dart:async';
-import 'dart:html' as html;
+import 'dart:js_interop';
+import 'package:web/web.dart' as web;
 import 'package:transmit_client/transmit.dart';
 
 Transmit? transmit;
@@ -17,15 +18,15 @@ StreamSubscription<dynamic>? streamSubscription;
 
 void main() {
   // Set up button event listeners
-  final connectBtn = html.document.getElementById('connectBtn') as html.ButtonElement?;
-  final disconnectBtn = html.document.getElementById('disconnectBtn') as html.ButtonElement?;
-  final triggerBtn = html.document.getElementById('triggerBtn') as html.ButtonElement?;
-  final clearBtn = html.document.getElementById('clearBtn') as html.ButtonElement?;
+  final connectBtn = web.document.getElementById('connectBtn') as web.HTMLButtonElement?;
+  final disconnectBtn = web.document.getElementById('disconnectBtn') as web.HTMLButtonElement?;
+  final triggerBtn = web.document.getElementById('triggerBtn') as web.HTMLButtonElement?;
+  final clearBtn = web.document.getElementById('clearBtn') as web.HTMLButtonElement?;
   
-  connectBtn?.onClick.listen((e) => connect());
-  disconnectBtn?.onClick.listen((e) => disconnect());
-  triggerBtn?.onClick.listen((e) => triggerEvent());
-  clearBtn?.onClick.listen((e) => clearMessages());
+  connectBtn?.onclick = ((web.Event event) => connect()).toJS;
+  disconnectBtn?.onclick = ((web.Event event) => disconnect()).toJS;
+  triggerBtn?.onclick = ((web.Event event) => triggerEvent()).toJS;
+  clearBtn?.onclick = ((web.Event event) => clearMessages()).toJS;
   
   // Auto-connect on page load
   connect();
@@ -38,9 +39,9 @@ void connect() {
   }
 
   updateStatus('connecting', 'Connecting...');
-  final connectBtn = html.document.getElementById('connectBtn') as html.ButtonElement?;
-  final disconnectBtn = html.document.getElementById('disconnectBtn') as html.ButtonElement?;
-  final triggerBtn = html.document.getElementById('triggerBtn') as html.ButtonElement?;
+  final connectBtn = web.document.getElementById('connectBtn') as web.HTMLButtonElement?;
+  final disconnectBtn = web.document.getElementById('disconnectBtn') as web.HTMLButtonElement?;
+  final triggerBtn = web.document.getElementById('triggerBtn') as web.HTMLButtonElement?;
   
   connectBtn?.disabled = true;
 
@@ -57,9 +58,9 @@ void connect() {
   ));
 
   // Update UID display
-  final uidElement = html.document.getElementById('uid');
+  final uidElement = web.document.getElementById('uid');
   if (uidElement != null) {
-    uidElement.text = transmit!.uid;
+    uidElement.textContent = transmit!.uid;
   }
 
   // Listen to connection events
@@ -138,9 +139,9 @@ void disconnect() {
   subscription = null;
 
   updateStatus('disconnected', 'Disconnected');
-  final connectBtn = html.document.getElementById('connectBtn') as html.ButtonElement?;
-  final disconnectBtn = html.document.getElementById('disconnectBtn') as html.ButtonElement?;
-  final triggerBtn = html.document.getElementById('triggerBtn') as html.ButtonElement?;
+  final connectBtn = web.document.getElementById('connectBtn') as web.HTMLButtonElement?;
+  final disconnectBtn = web.document.getElementById('disconnectBtn') as web.HTMLButtonElement?;
+  final triggerBtn = web.document.getElementById('triggerBtn') as web.HTMLButtonElement?;
   
   connectBtn?.disabled = false;
   disconnectBtn?.disabled = true;
@@ -149,46 +150,44 @@ void disconnect() {
   addMessage('Disconnected', 'info');
 }
 
-void triggerEvent() {
-  html.HttpRequest.request(
-    'http://localhost:3333/test',
-    method: 'GET',
-  ).then((request) {
-    if (request.status == 200) {
+void triggerEvent() async {
+  try {
+    final response = await web.window.fetch('http://localhost:3333/test'.toJS).toDart;
+    if (response.status == 200) {
       addMessage('Test event triggered', 'success');
     } else {
-      addMessage('Failed to trigger event: ${request.status}', 'error');
+      addMessage('Failed to trigger event: ${response.status}', 'error');
     }
-  }).catchError((error) {
+  } catch (error) {
     addMessage('Error triggering event: $error', 'error');
-  });
+  }
 }
 
 void clearMessages() {
-  final messagesDiv = html.document.getElementById('messages');
+  final messagesDiv = web.document.getElementById('messages');
   if (messagesDiv != null) {
-    messagesDiv.innerHtml = '';
+    messagesDiv.innerHTML = ''.toJS;
   }
 }
 
 void updateStatus(String status, String text) {
-  final statusDiv = html.document.getElementById('status');
+  final statusDiv = web.document.getElementById('status');
   if (statusDiv != null) {
     statusDiv.className = 'status $status';
-    statusDiv.text = text;
+    statusDiv.textContent = text;
   }
 }
 
 void addMessage(String message, String type) {
-  final messagesDiv = html.document.getElementById('messages');
+  final messagesDiv = web.document.getElementById('messages');
   if (messagesDiv == null) return;
 
-  final messageDiv = html.DivElement()
+  final messageDiv = web.HTMLDivElement()
     ..className = 'message message-$type'
-    ..innerHtml = '''
+    ..innerHTML = '''
       <div class="message-time">${DateTime.now().toLocal().toString().substring(11, 19)}</div>
       <div class="message-content">$message</div>
-    ''';
+    '''.toJS;
 
   messagesDiv.insertAdjacentElement('afterbegin', messageDiv);
 
