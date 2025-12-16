@@ -42,7 +42,6 @@ class TransmitOptions {
   final void Function(http.Response)? onSubscribeFailed;
   final void Function(String)? onSubscription;
   final void Function(String)? onUnsubscription;
-  final Duration? heartbeatTimeout;
 
   TransmitOptions({
     required this.baseUrl,
@@ -64,7 +63,6 @@ class TransmitOptions {
     this.onSubscribeFailed,
     this.onSubscription,
     this.onUnsubscription,
-    this.heartbeatTimeout,
   });
 }
 
@@ -81,15 +79,11 @@ class Transmit {
   StreamSubscription<void>? _openSubscription;
   StreamSubscription<void>? _errorSubscription;
   final StreamController<TransmitStatus> _statusController = StreamController<TransmitStatus>.broadcast();
-  final List<void Function(String channel, dynamic payload)> _globalMessageHandlers = [];
   int _reconnectAttempts = 0;
   Timer? _reconnectTimer;
-  Timer? _heartbeatTimer;
   bool _isReconnecting = false;
   bool _isClosed = false;
-  bool _isManuallyDisconnected = false;
   DateTime? _nextRetryTime;
-  DateTime? _lastDataReceived;
   void Function()? _onReconnectingCallback;
   void Function()? _onReconnectedCallback;
   void Function()? _onDisconnectedCallback;
@@ -176,7 +170,7 @@ class Transmit {
 
   /// Connect to the server.
   Future<void> _connect() async {
-    if (_isClosed || _isManuallyDisconnected) {
+    if (_isClosed) {
       return;
     }
 
@@ -187,9 +181,8 @@ class Transmit {
 
     _changeStatus(TransmitStatus.connecting);
 
-    // Clean up previous connection and wait a bit to ensure it's fully closed
+    // Clean up previous connection
     await _cleanupConnection();
-    await Future.delayed(const Duration(milliseconds: 100));
 
     final url = Uri.parse('${_options.baseUrl}/__transmit/events').replace(queryParameters: {'uid': _uid});
 
@@ -216,24 +209,10 @@ class Transmit {
 
       await _reRegisterSubscriptions();
 
-      // Start heartbeat monitoring
-      _startHeartbeatMonitoring();
-
       // Listen to messages
       _messageSubscription = _eventSource.stream.listen(
         _onMessage,
-        onError: (error) {
-          // Stream error - connection lost
-          _stopHeartbeatMonitoring();
-          _onError(error);
-        },
-        onDone: () {
-          // Stream ended - connection closed
-          _stopHeartbeatMonitoring();
-          if (!_isClosed && _status == TransmitStatus.connected) {
-            _onError(null);
-          }
-        },
+        onError: _onError,
         cancelOnError: false,
       );
 
@@ -244,7 +223,6 @@ class Transmit {
         _reconnectAttempts = 0;
         _isReconnecting = false;
         _nextRetryTime = null;
-        _startHeartbeatMonitoring();
         await _reRegisterSubscriptions();
       });
 
@@ -268,7 +246,6 @@ class Transmit {
 
   /// Clean up the current connection.
   Future<void> _cleanupConnection() async {
-    _stopHeartbeatMonitoring();
     _messageSubscription?.cancel();
     _messageSubscription = null;
     _openSubscription?.cancel();
@@ -281,22 +258,10 @@ class Transmit {
       // Ignore errors during cleanup
     }
     _eventSource = null;
-    
-    // Small delay to ensure cleanup completes
-    await Future.delayed(const Duration(milliseconds: 50));
   }
 
   /// Handle incoming messages.
   void _onMessage(MessageEvent event) {
-    // Update last data received time (any data, including heartbeats, means connection is alive)
-    _lastDataReceived = DateTime.now();
-    _resetHeartbeatTimer();
-
-    // If data is null, this is a heartbeat (comment line) - just acknowledge it
-    if (event.data == null) {
-      return;
-    }
-
     try {
       final eventData = event.data ?? '';
       if (eventData.isEmpty) {
@@ -311,30 +276,8 @@ class Transmit {
         return;
       }
 
-      // Skip system channels (e.g., $$transmit/ping)
-      if (channel.startsWith('\$\$transmit/')) {
-        return;
-      }
-
-      // Call global message handlers first
-      for (final handler in _globalMessageHandlers) {
-        try {
-          handler(channel, payload);
-        } catch (error) {
-          // Ignore errors in global handlers to prevent breaking other handlers
-        }
-      }
-
-      // Then call subscription-specific handlers
       final subscription = _subscriptions[channel];
       if (subscription == null) {
-        return;
-      }
-
-      // Skip if subscription was deleted (shouldn't happen but safety check)
-      if (subscription.isDeleted) {
-        // Clean up deleted subscription from map
-        _subscriptions.remove(channel);
         return;
       }
 
@@ -343,51 +286,10 @@ class Transmit {
       // Error handling - silently ignore parsing errors
     }
   }
-  
-  /// Reset the heartbeat timeout timer.
-  void _resetHeartbeatTimer() {
-    _heartbeatTimer?.cancel();
-    
-    if (_isClosed || _status != TransmitStatus.connected) {
-      return;
-    }
-    
-    // Use configurable timeout or default to 30 seconds
-    // Recommended: Set to 3x your server's pingInterval
-    // (e.g., if server sends heartbeats every 10s, use 30s timeout)
-    final timeout = _options.heartbeatTimeout ?? const Duration(seconds: 30);
-    
-    _heartbeatTimer = Timer(timeout, () {
-      if (!_isClosed && _status == TransmitStatus.connected) {
-        // Check if we've received data recently
-        if (_lastDataReceived == null || 
-            DateTime.now().difference(_lastDataReceived!) > timeout) {
-          // No data received for timeout duration - connection is dead
-          _onError(null);
-        } else {
-          // Reset timer if we received data recently
-          _resetHeartbeatTimer();
-        }
-      }
-    });
-  }
-  
-  /// Start heartbeat monitoring.
-  void _startHeartbeatMonitoring() {
-    _lastDataReceived = DateTime.now();
-    _resetHeartbeatTimer();
-  }
-  
-  /// Stop heartbeat monitoring.
-  void _stopHeartbeatMonitoring() {
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = null;
-    _lastDataReceived = null;
-  }
 
   /// Handle connection errors.
   void _onError(dynamic error) {
-    if (_isClosed || _isManuallyDisconnected) {
+    if (_isClosed) {
       return;
     }
 
@@ -460,33 +362,17 @@ class Transmit {
 
   /// Re-register subscriptions that have already been created.
   Future<void> _reRegisterSubscriptions() async {
-    // First, clean up deleted subscriptions
-    _cleanupDeletedSubscriptions();
-    
-    // Then re-register active subscriptions
     for (final subscription in _subscriptions.values) {
-      // Only re-register subscriptions that were created and not deleted
-      if (subscription.isCreated && !subscription.isDeleted) {
+      if (subscription.isCreated) {
         await subscription.forceCreate();
       }
     }
   }
 
-  /// Remove deleted subscriptions from the internal map.
-  void _cleanupDeletedSubscriptions() {
-    _subscriptions.removeWhere((channel, subscription) => subscription.isDeleted);
-  }
-
   /// Create or get a subscription for a channel.
   Subscription subscription(String channel) {
-    final existing = _subscriptions[channel];
-    if (existing != null) {
-      // If subscription was deleted, remove it and create a new one
-      if (existing.isDeleted) {
-        _subscriptions.remove(channel);
-      } else {
-        return existing;
-      }
+    if (_subscriptions.containsKey(channel)) {
+      return _subscriptions[channel]!;
     }
 
     final subscription = Subscription(SubscriptionOptions(
@@ -494,52 +380,10 @@ class Transmit {
       httpClient: _httpClient,
       hooks: _hooks,
       getEventSourceStatus: () => _status,
-      onDeleted: (ch) {
-        // Auto-remove from internal map when subscription is deleted
-        _subscriptions.remove(ch);
-      },
     ));
 
     _subscriptions[channel] = subscription;
     return subscription;
-  }
-
-  /// Remove a subscription from the internal map.
-  /// 
-  /// This should be called after calling subscription.delete() to ensure
-  /// the subscription is fully cleaned up and won't be re-registered on reconnect.
-  /// 
-  /// Example:
-  /// ```dart
-  /// await subscription.delete();
-  /// transmit.removeSubscription('channel-name');
-  /// ```
-  void removeSubscription(String channel) {
-    _subscriptions.remove(channel);
-  }
-
-  /// Register a global message handler that will be called for all messages from all subscriptions.
-  /// 
-  /// This is useful for logging, debugging, or handling messages globally before they reach
-  /// subscription-specific handlers.
-  /// 
-  /// Returns a function to unregister the handler.
-  /// 
-  /// Example:
-  /// ```dart
-  /// // Log all messages
-  /// final unsubscribe = transmit.onMessage((channel, payload) {
-  ///   print('Received message on $channel: $payload');
-  /// });
-  /// 
-  /// // Later, unregister
-  /// unsubscribe();
-  /// ```
-  void Function() onMessage<T>(void Function(String channel, T payload) handler) {
-    _globalMessageHandlers.add(handler as void Function(String, dynamic));
-    return () {
-      _globalMessageHandlers.remove(handler);
-    };
   }
 
   /// Listen to status events.
@@ -582,78 +426,6 @@ class Transmit {
     return _httpClient.getHeaders();
   }
 
-  /// Disconnect from the server temporarily. This disconnects but allows reconnecting later.
-  /// 
-  /// Use this when you want to temporarily disable realtime (e.g., when app goes to background,
-  /// user logs out temporarily, or to save battery).
-  /// 
-  /// Subscriptions are preserved and will be re-registered when you call `connect()` again.
-  /// 
-  /// Example:
-  /// ```dart
-  /// // Disconnect when app goes to background
-  /// await transmit.disconnect();
-  /// 
-  /// // Reconnect when app comes to foreground
-  /// await transmit.connect();
-  /// ```
-  Future<void> disconnect() async {
-    if (_isClosed) {
-      return;
-    }
-    
-    _isManuallyDisconnected = true;
-    
-    // Stop heartbeat monitoring
-    _stopHeartbeatMonitoring();
-    
-    // Cancel any pending reconnect attempts
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _isReconnecting = false;
-    _nextRetryTime = null;
-    
-    // Clean up current connection
-    await _cleanupConnection();
-    
-    // Update status
-    if (_status != TransmitStatus.disconnected) {
-      _changeStatus(TransmitStatus.disconnected);
-    }
-  }
-
-  /// Connect to the server. This will reconnect if previously disconnected.
-  /// 
-  /// If the connection was manually disconnected via `disconnect()`, this will restore it.
-  /// All subscriptions will be automatically re-registered.
-  /// 
-  /// Example:
-  /// ```dart
-  /// // Reconnect after being disconnected
-  /// await transmit.connect();
-  /// ```
-  Future<void> connect() async {
-    if (_isClosed) {
-      print('Transmit is closed, cannot connect');
-      return;
-    }
-    
-    if (!_isManuallyDisconnected) {
-      // Already connected or connecting, no need to do anything
-      return;
-    }
-    
-    _isManuallyDisconnected = false;
-    
-    // Reset reconnect attempts for fresh start
-    _reconnectAttempts = 0;
-    _isReconnecting = false;
-    _nextRetryTime = null;
-    
-    // Connect immediately
-    await _connect();
-  }
-
   /// Force a reconnection attempt. This will cancel any pending reconnect timer
   /// and immediately attempt to reconnect.
   /// 
@@ -676,27 +448,19 @@ class Transmit {
       return;
     }
 
-    if (_isManuallyDisconnected) {
-      print('Transmit is manually disconnected, use connect() instead');
-      return;
-    }
-
     // Cancel any pending reconnect timer
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _nextRetryTime = null;
 
-    // Force cleanup of existing connection first
-    await _cleanupConnection();
+    // If already connected, no need to reconnect
+    if (_status == TransmitStatus.connected) {
+      // return;
+    }
 
     // Reset reconnect attempts to allow fresh reconnection
     _reconnectAttempts = 0;
     _isReconnecting = false;
-
-    // If we were connected, mark as disconnected first to trigger proper status update
-    if (_status == TransmitStatus.connected) {
-      _changeStatus(TransmitStatus.disconnected);
-    }
 
     // Force immediate connection
     await _connect();
@@ -709,11 +473,9 @@ class Transmit {
     _nextRetryTime = null;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
-    _stopHeartbeatMonitoring();
     _messageSubscription?.cancel();
     _openSubscription?.cancel();
     _errorSubscription?.cancel();
-    _globalMessageHandlers.clear();
     try {
       _eventSource?.close();
     } catch (e) {

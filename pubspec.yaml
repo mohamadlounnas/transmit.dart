@@ -1,6 +1,6 @@
 name: transmit_client
 description: A Dart client for the native Server-Sent-Event (SSE) module of AdonisJS.
-version: 1.2.0
+version: 1.2.1
 homepage: https://github.com/feeefapp/transmit.dart
 repository: https://github.com/feeefapp/transmit.dart
 
